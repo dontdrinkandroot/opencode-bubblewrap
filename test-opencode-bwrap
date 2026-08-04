@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+EXPECTED_ETC="group hosts ld.so.cache localtime nsswitch.conf passwd resolv.conf ssl timezone"
+ALLOWLIST_VARS="HOME PATH TMPDIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME"
+
+fails=0
+pass() { printf 'PASS: %s\n' "$1"; }
+fail() { printf 'FAIL: %s\n' "$1"; fails=$((fails + 1)); }
+
+if ! command -v bwrap >/dev/null 2>&1; then
+    echo "test-opencode-bwrap: bwrap not found" >&2
+    exit 1
+fi
+if [ ! -x ./opencode-bwrap ]; then
+    echo "test-opencode-bwrap: ./opencode-bwrap not executable" >&2
+    exit 1
+fi
+
+if bash -n opencode-bwrap; then
+    pass "bash -n opencode-bwrap"
+else
+    fail "bash -n opencode-bwrap"
+fi
+
+if out=$(OPENCODE_BIN=/usr/bin/getent ./opencode-bwrap hosts api.openai.com 2>&1) && [ -n "$out" ]; then
+    pass "dns resolves api.openai.com"
+else
+    fail "dns resolves api.openai.com"
+fi
+
+out=$(OPENCODE_BIN=/usr/bin/ls ./opencode-bwrap /etc 2>&1)
+actual=$(printf '%s' "$out" | sort | awk 'NR>1{printf " "} {printf "%s", $0}' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+if [ "$actual" = "$EXPECTED_ETC" ]; then
+    pass "/etc whitelist"
+else
+    fail "/etc whitelist (got: $actual)"
+fi
+
+out=$(OPENCODE_BWRAP_TEST_SECRET=s3cr3t OPENCODE_BIN=/usr/bin/env ./opencode-bwrap 2>&1)
+if printf '%s' "$out" | grep -q '^OPENCODE_BWRAP_TEST_SECRET='; then
+    fail "env isolation: secret leaked"
+else
+    pass "env isolation: host secret not forwarded"
+    for v in $ALLOWLIST_VARS; do
+        if printf '%s' "$out" | grep -q "^$v="; then
+            pass "env has allowlisted $v"
+        else
+            fail "env missing allowlisted $v"
+        fi
+    done
+fi
+
+out=$(OPENCODE_BWRAP_PASSTHROUGH=OPENCODE_BWRAP_TEST_SECRET OPENCODE_BWRAP_TEST_SECRET=s3cr3t OPENCODE_BIN=/usr/bin/env ./opencode-bwrap 2>&1)
+if printf '%s' "$out" | grep -q '^OPENCODE_BWRAP_TEST_SECRET=s3cr3t'; then
+    pass "OPENCODE_BWRAP_PASSTHROUGH forwards selected var"
+else
+    fail "OPENCODE_BWRAP_PASSTHROUGH forwards selected var"
+fi
+
+if OPENCODE_BIN=/usr/bin/sh ./opencode-bwrap -c 'test -w /dev/shm' 2>/dev/null; then
+    pass "/dev/shm is writable"
+else
+    fail "/dev/shm is writable"
+fi
+
+temp_home=$(mktemp -d)
+trap 'rm -rf "$temp_home"' EXIT
+mkdir -p "$temp_home/.config/opencode"
+printf '{"brand":"bwrap"}\n'    > "$temp_home/.config/opencode/opencode.bwrap.json"
+printf '{"brand":"original"}\n' > "$temp_home/.config/opencode/opencode.json"
+out=$(HOME="$temp_home" OPENCODE_BIN=/usr/bin/cat ./opencode-bwrap "$temp_home/.config/opencode/opencode.json" 2>&1)
+if printf '%s' "$out" | grep -q '"brand":"bwrap"' && ! printf '%s' "$out" | grep -q '"brand":"original"'; then
+    pass "opencode.bwrap.json replaces opencode.json"
+else
+    fail "opencode.bwrap.json replaces opencode.json (got: $out)"
+fi
+
+mkdir -p "$temp_home/binddir/sub"
+printf 'marker-content\n' > "$temp_home/binddir/marker.txt"
+printf '# comment\n\nbind-ro %s\npath %s\nenv OPENCODE_BWRAP_CONF_VAR=helo\n' \
+    "$temp_home/binddir" "$temp_home/binddir/sub" \
+    > "$temp_home/.config/opencode/opencode-bwrap.conf"
+
+out=$(HOME="$temp_home" OPENCODE_BIN=/usr/bin/cat ./opencode-bwrap "$temp_home/binddir/marker.txt" 2>&1)
+if printf '%s' "$out" | grep -q 'marker-content'; then
+    pass "conf bind-ro exposes directory read-only"
+else
+    fail "conf bind-ro exposes directory read-only (got: $out)"
+fi
+
+out=$(HOME="$temp_home" OPENCODE_BIN=/usr/bin/env ./opencode-bwrap 2>&1)
+pathline=$(printf '%s\n' "$out" | grep '^PATH=')
+case "$pathline" in
+    *"$temp_home/binddir/sub"*) pass "conf path appended to sandbox PATH" ;;
+    *) fail "conf path appended to sandbox PATH (got: $pathline)" ;;
+esac
+if printf '%s' "$out" | grep -q '^OPENCODE_BWRAP_CONF_VAR=helo'; then
+    pass "conf env set in sandbox"
+else
+    fail "conf env set in sandbox"
+fi
+
+mkdir -p "$temp_home/rwdir"
+printf 'bind-rw %s\n' "$temp_home/rwdir" > "$temp_home/.config/opencode/opencode-bwrap.conf"
+if HOME="$temp_home" OPENCODE_BIN=/usr/bin/sh ./opencode-bwrap -c "printf 'sandbox-wrote\n' > '$temp_home/rwdir/out.txt'" 2>/dev/null \
+    && printf '%s' "$(cat "$temp_home/rwdir/out.txt")" | grep -q 'sandbox-wrote'; then
+    pass "conf bind-rw persists writes to host"
+else
+    fail "conf bind-rw persists writes to host"
+fi
+
+printf 'bind-ro %s\n' "$temp_home/does-not-exist" > "$temp_home/.config/opencode/opencode-bwrap.conf"
+if HOME="$temp_home" OPENCODE_BIN=/usr/bin/true ./opencode-bwrap 2>/dev/null; then
+    fail "conf bind-ro missing source fails hard"
+else
+    pass "conf bind-ro missing source fails hard"
+fi
+
+printf 'bind-rw %s\n' "$temp_home/does-not-exist-rw" > "$temp_home/.config/opencode/opencode-bwrap.conf"
+if HOME="$temp_home" OPENCODE_BIN=/usr/bin/true ./opencode-bwrap 2>/dev/null; then
+    fail "conf bind-rw missing source fails hard"
+else
+    pass "conf bind-rw missing source fails hard"
+fi
+
+if ./opencode-bwrap --version >/dev/null 2>&1; then
+    pass "real opencode --version"
+else
+    fail "real opencode --version (is opencode on PATH?)"
+fi
+
+if [ "$fails" -ne 0 ]; then
+    printf '%d check(s) failed\n' "$fails" >&2
+    exit 1
+fi
+printf 'all checks passed\n'

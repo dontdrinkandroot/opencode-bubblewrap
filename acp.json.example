@@ -1,0 +1,8 @@
+{
+  "agent_servers": {
+    "OpenCode (sandboxed)": {
+      "command": "/absolute/path/to/opencode-bwrap",
+      "args": ["acp"]
+    }
+  }
+}

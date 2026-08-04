@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OPENCODE_BIN="${OPENCODE_BIN:-$(command -v opencode || true)}"
+
+if [ -z "$OPENCODE_BIN" ]; then
+    echo "opencode-bwrap: opencode not found in PATH (set OPENCODE_BIN to point at the binary)" >&2
+    exit 1
+fi
+if [ ! -x "$OPENCODE_BIN" ]; then
+    echo "opencode-bwrap: '$OPENCODE_BIN' is not executable" >&2
+    exit 1
+fi
+
+OPENCODE_REAL="$(readlink -f "$OPENCODE_BIN")"
+OPENCODE_DIR="$(dirname "$OPENCODE_REAL")"
+
+OP_CONFIG="$HOME/.config/opencode"
+OP_DATA="$HOME/.local/share/opencode"
+OP_CACHE="$HOME/.cache/opencode"
+OP_STATE="$HOME/.local/state/opencode"
+
+mkdir -p "$OP_CONFIG" "$OP_DATA" "$OP_CACHE" "$OP_STATE"
+
+BWRAP_CONFIG="$OP_CONFIG/opencode.bwrap.json"
+BWRAP_OVERLAY=()
+if [ -f "$BWRAP_CONFIG" ]; then
+    BWRAP_OVERLAY=(--ro-bind "$BWRAP_CONFIG" "$HOME/.config/opencode/opencode.json")
+fi
+
+PROJECT_DIR="$(pwd)"
+if [ ! -d "$PROJECT_DIR" ]; then
+    echo "opencode-bwrap: current directory '$PROJECT_DIR' is not accessible" >&2
+    exit 1
+fi
+
+EXTRA_ENV=()
+BWRAP_BINDS=()
+WRAPPER_PATH=()
+WRAPPER_CONF="$OP_CONFIG/opencode-bwrap.conf"
+SANDBOX_PATH="/usr/bin:/bin:$OPENCODE_DIR"
+if [ -r "$WRAPPER_CONF" ]; then
+    while IFS= read -r line; do
+        case "$line" in
+            ''|'#'*) continue ;;
+        esac
+        read -r directive arg rest <<< "$line"
+        case "$directive" in
+            bind-ro|bind-rw)
+                src="$arg"
+                dest="${rest:-$src}"
+                if [ -z "$src" ] || [ ! -d "$src" ]; then
+                    echo "opencode-bwrap: $WRAPPER_CONF: $directive '$arg' is not a directory" >&2
+                    exit 1
+                fi
+                if [ "$directive" = 'bind-ro' ]; then
+                    BWRAP_BINDS+=(--ro-bind "$src" "$dest")
+                else
+                    BWRAP_BINDS+=(--bind "$src" "$dest")
+                fi
+                ;;
+            path)
+                if [ -z "$arg" ]; then
+                    echo "opencode-bwrap: $WRAPPER_CONF: path requires an argument" >&2
+                    exit 1
+                fi
+                WRAPPER_PATH+=("$arg")
+                ;;
+            env)
+                name="${arg%%=*}"
+                value="${arg#*=}"
+                if [ -z "$name" ] || [ "$arg" = "$value" ]; then
+                    echo "opencode-bwrap: $WRAPPER_CONF: env requires NAME=VALUE" >&2
+                    exit 1
+                fi
+                EXTRA_ENV+=(--setenv "$name" "$value")
+                ;;
+            *)
+                echo "opencode-bwrap: $WRAPPER_CONF: unknown directive '$directive'" >&2
+                exit 1
+                ;;
+        esac
+    done < "$WRAPPER_CONF"
+    for p in "${WRAPPER_PATH[@]}"; do
+        SANDBOX_PATH="$SANDBOX_PATH:$p"
+    done
+fi
+
+for v in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; do
+    [ -n "${!v:-}" ] && EXTRA_ENV+=(--setenv "$v" "${!v}")
+done
+for v in ${OPENCODE_BWRAP_PASSTHROUGH:-}; do
+    [ -n "${!v:-}" ] && EXTRA_ENV+=(--setenv "$v" "${!v}")
+done
+[ -n "${NO_COLOR:-}" ] && EXTRA_ENV+=(--setenv NO_COLOR "$NO_COLOR")
+
+exec bwrap \
+    --unshare-all \
+    --share-net \
+    --die-with-parent \
+    --new-session \
+    --proc /proc \
+    --dev /dev \
+    --tmpfs /tmp \
+    --tmpfs /run \
+    --tmpfs /dev/shm \
+    --ro-bind-try /run/systemd/resolve /run/systemd/resolve \
+    --ro-bind /usr /usr \
+    --symlink usr/bin /bin \
+    --symlink usr/sbin /sbin \
+    --ro-bind-try /etc/hosts /etc/hosts \
+    --ro-bind-try /etc/resolv.conf /etc/resolv.conf \
+    --ro-bind-try /etc/nsswitch.conf /etc/nsswitch.conf \
+    --ro-bind-try /etc/passwd /etc/passwd \
+    --ro-bind-try /etc/group /etc/group \
+    --ro-bind-try /etc/ssl /etc/ssl \
+    --ro-bind-try /etc/localtime /etc/localtime \
+    --ro-bind-try /etc/timezone /etc/timezone \
+    --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache \
+    --ro-bind-try /lib /lib \
+    --ro-bind-try /lib64 /lib64 \
+    --ro-bind-try /lib32 /lib32 \
+    --ro-bind-try "$OPENCODE_DIR" "$OPENCODE_DIR" \
+    --dir "$HOME" \
+    --bind "$PROJECT_DIR" "$PROJECT_DIR" \
+    --bind "$OP_CONFIG" "$HOME/.config/opencode" \
+    --bind "$OP_DATA" "$HOME/.local/share/opencode" \
+    --bind "$OP_CACHE" "$HOME/.cache/opencode" \
+    --bind "$OP_STATE" "$HOME/.local/state/opencode" \
+    "${BWRAP_OVERLAY[@]}" \
+    "${BWRAP_BINDS[@]}" \
+    --clearenv \
+    --setenv HOME "$HOME" \
+    --setenv PATH "$SANDBOX_PATH" \
+    --setenv TMPDIR /tmp \
+    --setenv XDG_CONFIG_HOME "$HOME/.config" \
+    --setenv XDG_DATA_HOME "$HOME/.local/share" \
+    --setenv XDG_CACHE_HOME "$HOME/.cache" \
+    --setenv XDG_STATE_HOME "$HOME/.local/state" \
+    --setenv TERM "${TERM:-xterm}" \
+    --setenv LANG "${LANG:-C.UTF-8}" \
+    "${EXTRA_ENV[@]}" \
+    --chdir "$PROJECT_DIR" \
+    -- "$OPENCODE_REAL" "$@"
