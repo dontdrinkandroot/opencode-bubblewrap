@@ -29,6 +29,10 @@ if [ -f "$BWRAP_CONFIG" ]; then
 fi
 
 PROJECT_DIR="$(pwd)"
+if ! PROJECT_DIR="$(readlink -f "$PROJECT_DIR")"; then
+    echo "opencode-bwrap: cannot resolve current directory '$PROJECT_DIR'" >&2
+    exit 1
+fi
 if [ ! -d "$PROJECT_DIR" ]; then
     echo "opencode-bwrap: current directory '$PROJECT_DIR' is not accessible" >&2
     exit 1

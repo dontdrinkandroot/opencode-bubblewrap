@@ -3,7 +3,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-EXPECTED_ETC="group hosts ld.so.cache localtime nsswitch.conf passwd resolv.conf ssl timezone"
+EXPECTED_ETC=""
+for f in group hosts ld.so.cache localtime nsswitch.conf passwd resolv.conf ssl timezone; do
+    if [ -e "/etc/$f" ]; then
+        EXPECTED_ETC="$EXPECTED_ETC $f"
+    fi
+done
+EXPECTED_ETC="${EXPECTED_ETC# }"
 ALLOWLIST_VARS="HOME PATH TMPDIR XDG_CONFIG_HOME XDG_DATA_HOME XDG_CACHE_HOME XDG_STATE_HOME"
 
 fails=0
@@ -117,6 +123,17 @@ if HOME="$temp_home" OPENCODE_BIN=/usr/bin/true ./opencode-bwrap 2>/dev/null; th
     fail "conf bind-ro missing source fails hard"
 else
     pass "conf bind-ro missing source fails hard"
+fi
+
+script_path="$PWD/opencode-bwrap"
+: > "$temp_home/.config/opencode/opencode-bwrap.conf"
+mkdir -p "$temp_home/realdir"
+ln -s "$temp_home/realdir" "$temp_home/linkdir"
+out=$(cd "$temp_home/linkdir" && HOME="$temp_home" OPENCODE_BIN=/usr/bin/pwd "$script_path" 2>&1)
+if [ "$out" = "$temp_home/realdir" ]; then
+    pass "symlinked cwd resolves to canonical path in sandbox"
+else
+    fail "symlinked cwd resolves to canonical path in sandbox (got: $out)"
 fi
 
 printf 'bind-rw %s\n' "$temp_home/does-not-exist-rw" > "$temp_home/.config/opencode/opencode-bwrap.conf"
