@@ -125,6 +125,17 @@ else
     pass "conf bind-ro missing source fails hard"
 fi
 
+script_path="$PWD/opencode-bwrap"
+: > "$temp_home/.config/opencode/opencode-bwrap.conf"
+mkdir -p "$temp_home/realdir"
+ln -s "$temp_home/realdir" "$temp_home/linkdir"
+out=$(cd "$temp_home/linkdir" && HOME="$temp_home" OPENCODE_BIN=/usr/bin/pwd "$script_path" 2>&1)
+if [ "$out" = "$temp_home/realdir" ]; then
+    pass "symlinked cwd resolves to canonical path in sandbox"
+else
+    fail "symlinked cwd resolves to canonical path in sandbox (got: $out)"
+fi
+
 printf 'bind-rw %s\n' "$temp_home/does-not-exist-rw" > "$temp_home/.config/opencode/opencode-bwrap.conf"
 if HOME="$temp_home" OPENCODE_BIN=/usr/bin/true ./opencode-bwrap 2>/dev/null; then
     fail "conf bind-rw missing source fails hard"
