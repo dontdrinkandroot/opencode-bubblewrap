@@ -59,14 +59,15 @@ To run the full verification suite (syntax, DNS, `/etc` whitelist, env isolation
 | `$PWD` (the project opened in the IDE / current dir) | read-write |
 | `~/.config/opencode`, `~/.local/share/opencode`, `~/.cache/opencode`, `~/.local/state/opencode` | read-write |
 | `/usr` (+ symlinked `/bin`, `/sbin`, `/lib`, `/lib64`) | read-only |
-| `/etc` — whitelist only: `hosts`, `resolv.conf`, `nsswitch.conf`, `passwd`, `group`, `ssl`, `localtime`, `timezone`, `ld.so.cache` | read-only |
+| `/etc` — whitelist only: `hosts`, `resolv.conf`, `nsswitch.conf`, `passwd`, `group`, `ssl`, `ca-certificates`, `pki`, `crypto-policies`, `localtime`, `timezone`, `ld.so.cache` | read-only |
+| Wayland socket (`$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY`) / X11 socket dir (`/tmp/.X11-unix`) / `Xauthority` | mounted only when present on host (needed for clipboard paste) |
 | directory containing the `opencode` binary | read-only |
 | `/proc`, `/dev`, `/dev/shm`, `/tmp`, `/run` | sandbox-internal (proc/devfs, writable tmpfs) |
 | Everything else in `$HOME` (`~/.ssh`, `~/.gitconfig`, `~/.config/gh`, dotfiles, ...) | **not mounted / invisible** |
 
 ### Environment
 
-- The environment is **not** passed through wholesale. The sandbox clears it (`--clearenv`) and only forwards an allowlist: `HOME`, `PATH` (minimal, includes the `opencode` binary dir), `TMPDIR`, `XDG_CONFIG_HOME`/`XDG_DATA_HOME`/`XDG_CACHE_HOME`/`XDG_STATE_HOME` (aligned with the bound directories), `TERM`, `LANG`, `NO_COLOR`, and the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` plus lowercase variants, only when set). API keys and any other secrets in the parent environment are **not** forwarded.
+- The environment is **not** passed through wholesale. The sandbox clears it (`--clearenv`) and only forwards an allowlist: `HOME`, `PATH` (minimal, includes the `opencode` binary dir), `TMPDIR`, `XDG_CONFIG_HOME`/`XDG_DATA_HOME`/`XDG_CACHE_HOME`/`XDG_STATE_HOME` (aligned with the bound directories), `TERM`, `LANG`, `NO_COLOR`, the proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` plus lowercase variants, only when set), CA bundle variables (`SSL_CERT_FILE`, `SSL_CERT_DIR`, `GIT_SSL_CAINFO`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE` — forwarded and read-only mounted when set), Go variables (`GOPROXY`, `GOSUMDB`, `GOPRIVATE`, `GONOPROXY`, `GONOSUMDB`, `GOFLAGS`, `GOTOOLCHAIN`), and display variables (`DISPLAY`, `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, `XAUTHORITY`) for clipboard support. API keys and any other secrets in the parent environment are **not** forwarded.
 - Credentials come from `opencode auth login`, which stores them in `~/.local/share/opencode/auth.json` (mounted read-write inside the sandbox) — no environment variables needed.
 - To forward extra variables (e.g. a provider API key exported in the shell), set `OPENCODE_BWRAP_PASSTHROUGH` to a space-separated list of names:
   ```sh
@@ -165,6 +166,40 @@ JetBrains can launch ACP subprocesses with a trimmed environment. If the script 
 }
 ```
 ## Troubleshoot
+
+### Go modules / TLS: `x509: certificate signed by unknown authority`
+
+The system CA store (`/etc/ssl`, `/etc/ca-certificates`, `/etc/pki`) is mounted read-only, and `SSL_CERT_FILE`/`SSL_CERT_DIR` (plus `GIT_SSL_CAINFO`, `NODE_EXTRA_CA_CERTS`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`) are forwarded when set — including corporate MITM bundles, which are read-only mounted at their host path. If `go mod download` still fails, your bundle probably lives under `$HOME` (invisible by design); expose it explicitly:
+
+```ini
+# ~/.config/opencode/opencode-bwrap.conf
+bind-ro /home/you/certs/corp.crt
+env SSL_CERT_FILE=/home/you/certs/corp.crt
+```
+
+Go toolchain variables (`GOPROXY`, `GOSUMDB`, `GOPRIVATE`, `GOFLAGS`, `GOTOOLCHAIN`, ...) are forwarded when set. To persist the module cache across runs (otherwise it re-downloads into the sandbox's ephemeral `$HOME`):
+
+```ini
+bind-rw /home/you/go
+bind-rw /home/you/.cache/go-build
+```
+
+### Clipboard: paste into sandboxed opencode says "not supported"
+
+Pasting needs the host display socket, which is mounted only when it exists (`--bind-try`, so headless/ACP stays isolated). On the host you need `wl-paste` (Wayland) or `xclip`/`xsel` (X11) installed, and `DISPLAY`/`WAYLAND_DISPLAY` set:
+
+```sh
+echo $DISPLAY $WAYLAND_DISPLAY $XDG_RUNTIME_DIR
+ls -l $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY /tmp/.X11-unix/  # whichever applies
+```
+
+Inside the sandbox the same socket must be visible:
+
+```sh
+OPENCODE_BIN=/usr/bin/sh ./opencode-bwrap -c 'ls -l $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY; ls -ld /tmp/.X11-unix'
+```
+
+If the socket is missing (SSH without `-X`/`-Y`, headless), bracketed paste (`Ctrl-Shift-V`) still works; only host-clipboard integration needs the socket.
 
 ### Ubuntu 24.04: AppArmor
 

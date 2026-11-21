@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 EXPECTED_ETC=""
-for f in group hosts ld.so.cache localtime nsswitch.conf passwd resolv.conf ssl timezone; do
+for f in group hosts ld.so.cache localtime nsswitch.conf passwd resolv.conf ssl ca-certificates pki crypto-policies timezone; do
     if [ -e "/etc/$f" ]; then
         EXPECTED_ETC="$EXPECTED_ETC $f"
     fi
@@ -70,6 +70,48 @@ if OPENCODE_BIN=/usr/bin/sh ./opencode-bwrap -c 'test -w /dev/shm' 2>/dev/null; 
     pass "/dev/shm is writable"
 else
     fail "/dev/shm is writable"
+fi
+
+if OPENCODE_BIN=/usr/bin/sh ./opencode-bwrap -c 'test -d /etc/ssl/certs && test -n "$(ls /etc/ssl/certs)"' 2>/dev/null; then
+    pass "CA store visible in sandbox"
+else
+    fail "CA store visible in sandbox"
+fi
+
+echo "ca-test" > "$PWD/.ca-bundle-test.tmp"
+if out=$(SSL_CERT_FILE="$PWD/.ca-bundle-test.tmp" OPENCODE_BIN=/usr/bin/cat ./opencode-bwrap "$PWD/.ca-bundle-test.tmp" 2>&1) && printf '%s' "$out" | grep -q 'ca-test'; then
+    pass "SSL_CERT_FILE bound into sandbox"
+else
+    fail "SSL_CERT_FILE bound into sandbox (got: $out)"
+fi
+rm -f "$PWD/.ca-bundle-test.tmp"
+
+out=$(SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt OPENCODE_BIN=/usr/bin/env ./opencode-bwrap 2>&1)
+if printf '%s' "$out" | grep -q '^SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt'; then
+    pass "SSL_CERT_FILE forwarded"
+else
+    fail "SSL_CERT_FILE forwarded"
+fi
+
+out=$(GOPROXY=direct GOSUMDB=off OPENCODE_BIN=/usr/bin/env ./opencode-bwrap 2>&1)
+if printf '%s' "$out" | grep -q '^GOPROXY=direct' && printf '%s' "$out" | grep -q '^GOSUMDB=off'; then
+    pass "Go env forwarded"
+else
+    fail "Go env forwarded"
+fi
+
+out=$(DISPLAY=:0 OPENCODE_BIN=/usr/bin/env ./opencode-bwrap 2>&1)
+if printf '%s' "$out" | grep -q '^DISPLAY=:0'; then
+    pass "DISPLAY forwarded for clipboard"
+else
+    fail "DISPLAY forwarded for clipboard"
+fi
+
+out=$(XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-0 OPENCODE_BIN=/usr/bin/env ./opencode-bwrap 2>&1)
+if printf '%s' "$out" | grep -q '^WAYLAND_DISPLAY=wayland-0' && printf '%s' "$out" | grep -q '^XDG_RUNTIME_DIR=/run/user/1000'; then
+    pass "Wayland env forwarded for clipboard"
+else
+    fail "Wayland env forwarded for clipboard"
 fi
 
 temp_home=$(mktemp -d)
